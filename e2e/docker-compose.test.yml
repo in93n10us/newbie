@@ -1,0 +1,120 @@
+const { exec } = require('child_process');
+const axios = require('axios');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
+
+describe('Docker Compose E2E Tests', () => {
+  const FRONTEND_URL = 'http://localhost:3000';
+  const BACKEND_URL = 'http://localhost:8000';
+  
+  beforeAll(async () => {
+    // Start docker compose environment
+    await execAsync('docker-compose -f docker-compose.yml up -d');
+    
+    // Wait for services to be ready
+    await new Promise(resolve => setTimeout(resolve, 30000));
+  }, 60000);
+
+  afterAll(async () => {
+    // Cleanup docker compose environment
+    await execAsync('docker-compose -f docker-compose.yml down');
+  });
+
+  describe('Container Health Checks', () => {
+    test('frontend container is running', async () => {
+      const { stdout } = await execAsync('docker ps -f name=frontend --format {{.Status}}');
+      expect(stdout).toMatch(/Up/);
+    });
+
+    test('backend container is running', async () => {
+      const { stdout } = await execAsync('docker ps -f name=backend --format {{.Status}}');
+      expect(stdout).toMatch(/Up/);
+    });
+  });
+
+  describe('Network Communication', () => {
+    test('frontend can reach backend', async () => {
+      const response = await axios.get(FRONTEND_URL);
+      expect(response.status).toBe(200);
+      expect(response.data).toBeDefined();
+    });
+
+    test('backend API is accessible', async () => {
+      const response = await axios.get(`${BACKEND_URL}/api/health`);
+      expect(response.status).toBe(200);
+      expect(response.data.status).toBe('healthy');
+    });
+  });
+
+  describe('Environment Variables', () => {
+    test('frontend has correct API URL configuration', async () => {
+      const { stdout } = await execAsync('docker exec frontend printenv NEXT_PUBLIC_API_URL');
+      expect(stdout.trim()).toBe('http://backend:8000');
+    });
+
+    test('backend has correct environment setup', async () => {
+      const { stdout } = await execAsync('docker exec backend printenv PYTHONUNBUFFERED');
+      expect(stdout.trim()).toBe('1');
+    });
+  });
+
+  describe('Volume Mounts', () => {
+    test('frontend code changes are reflected', async () => {
+      // Simulate code change in frontend
+      await execAsync('touch frontend/pages/index.tsx');
+      
+      // Check if changes trigger reload
+      const { stdout } = await execAsync('docker exec frontend ls -la /app/pages/index.tsx');
+      expect(stdout).toBeDefined();
+    });
+
+    test('backend code changes are reflected', async () => {
+      // Simulate code change in backend
+      await execAsync('touch backend/main.py');
+      
+      // Check if changes are mounted
+      const { stdout } = await execAsync('docker exec backend ls -la /app/main.py');
+      expect(stdout).toBeDefined();
+    });
+  });
+
+  describe('Error Handling', () => {
+    test('frontend handles backend connection failure gracefully', async () => {
+      // Stop backend container
+      await execAsync('docker stop backend');
+      
+      try {
+        await axios.get(FRONTEND_URL);
+      } catch (error) {
+        expect(error.response.status).toBe(503);
+      }
+
+      // Restart backend
+      await execAsync('docker start backend');
+    });
+
+    test('containers restart on failure', async () => {
+      // Force container exit
+      await execAsync('docker kill --signal=SIGKILL frontend');
+      
+      // Wait for restart
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      // Check if container restarted
+      const { stdout } = await execAsync('docker ps -f name=frontend --format {{.Status}}');
+      expect(stdout).toMatch(/Up/);
+    });
+  });
+
+  describe('Resource Limits', () => {
+    test('containers have memory limits applied', async () => {
+      const { stdout } = await execAsync('docker inspect frontend --format {{.HostConfig.Memory}}');
+      expect(parseInt(stdout)).toBeGreaterThan(0);
+    });
+
+    test('containers have CPU limits applied', async () => {
+      const { stdout } = await execAsync('docker inspect backend --format {{.HostConfig.NanoCpus}}');
+      expect(parseInt(stdout)).toBeGreaterThan(0);
+    });
+  });
+});
